@@ -50,146 +50,8 @@
 #include "up_arch.h"
 #include "tsb_scm.h"
 
-#define TSB_I2S_DRIVER_NAME                             "tsb i2s driver"
+#include "tsb_i2s.h"
 
-/*
- * Limit register polling loops so they don't go forever.  1000 should be
- * large enough to handle any case where something isn't seriously wrong.
- */
-#define TSB_I2S_POLL_LIMIT                              1000
-
-#define TSB_I2S_PLLA_ID                                 0
-
-#define TSB_I2S_TX_START_THRESHOLD                      0x20
-
-/* System Controller/Bridge Registers */
-#define TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR                0x0440
-
-#define TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_DAC16BIT_SEL   BIT(2)
-#define TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_LR_BCLK_SEL    BIT(1)
-#define TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_MASTER_CLOCK_SEL BIT(0)
-#define TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_MASK                                 \
-                        (TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_DAC16BIT_SEL      | \
-                         TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_LR_BCLK_SEL       | \
-                         TSB_CG_BRIDGE_I2S_CLOCK_SELECTOR_MASTER_CLOCK_SEL)
-
-/* I2S Registers */
-#define TSB_I2S_REG_START                               0x0004
-#define TSB_I2S_REG_BUSY                                0x0008
-#define TSB_I2S_REG_STOP                                0x000c
-#define TSB_I2S_REG_AUDIOSET                            0x0010
-#define TSB_I2S_REG_INTSTAT                             0x0014
-#define TSB_I2S_REG_INTMASK                             0x0018
-#define TSB_I2S_REG_INTCLR                              0x001c
-#define TSB_I2S_REG_MUTE                                0x0024
-#define TSB_I2S_REG_EPTR                                0x0028
-#define TSB_I2S_REG_TX_SSIZE                            0x0030
-#define TSB_I2S_REG_REGBUSY                             0x0040
-#define TSB_I2S_REG_MODESET                             0x00f8
-#define TSB_I2S_REG_LMEM00                              0x0100
-
-#define TSB_I2S_REG_START_START                         BIT(8)
-#define TSB_I2S_REG_START_SPK_MIC_START                 BIT(0)
-
-#define TSB_I2S_REG_BUSY_LRERRBUSY                      BIT(17)
-#define TSB_I2S_REG_BUSY_ERRBUSY                        BIT(16)
-#define TSB_I2S_REG_BUSY_BUSY                           BIT(8)
-#define TSB_I2S_REG_BUSY_SERIBUSY                       BIT(1)
-#define TSB_I2S_REG_BUSY_SPK_MIC_BUSY                   BIT(0)
-
-#define TSB_I2S_REG_STOP_I2S_STOP                       BIT(0)
-
-#define TSB_I2S_REG_AUDIOSET_DTFMT                      BIT(16)
-#define TSB_I2S_REG_AUDIOSET_SDEDGE                     BIT(12)
-#define TSB_I2S_REG_AUDIOSET_EDGE                       BIT(11)
-#define TSB_I2S_REG_AUDIOSET_SCLKTOWS                   BIT(8)
-#define TSB_I2S_REG_AUDIOSET_WORDLEN_MASK               0x3f
-#define TSB_I2S_REG_AUDIOSET_MASK           (TSB_I2S_REG_AUDIOSET_DTFMT     | \
-                                             TSB_I2S_REG_AUDIOSET_SDEDGE    | \
-                                             TSB_I2S_REG_AUDIOSET_EDGE      | \
-                                             TSB_I2S_REG_AUDIOSET_SCLKTOWS  | \
-                                             TSB_I2S_REG_AUDIOSET_WORDLEN_MASK)
-
-#define TSB_I2S_REG_INT_DMACMSK                         BIT(16)
-#define TSB_I2S_REG_INT_LRCK                            BIT(3)
-#define TSB_I2S_REG_INT_UR                              BIT(2)
-#define TSB_I2S_REG_INT_OR                              BIT(1)
-#define TSB_I2S_REG_INT_INT                             BIT(0)
-#define TSB_I2S_REG_INT_ERROR_MASK          (TSB_I2S_REG_INT_LRCK   | \
-                                             TSB_I2S_REG_INT_UR     | \
-                                             TSB_I2S_REG_INT_OR)
-
-#define TSB_I2S_REG_MUTE_MUTEN                          BIT(0)
-
-#define TSB_I2S_REG_EPTR_ERRPOINTER_GET(a)              ((a) & 0x3f)
-#define TSB_I2S_REG_EPTR_ERRPOINTER_SET(a)              ((a) & 0x3f)
-
-#define TSB_I2S_REG_TX_SSIZE_TXSTARTSIZE_GET(r)         ((r) & 0x3f)
-#define TSB_I2S_REG_TX_SSIZE_TXSTARTSIZE_SET(v)         ((v) & 0x3f)
-
-#define TSB_I2S_REG_REGBUSY_MODESETPEND                 BIT(19)
-#define TSB_I2S_REG_REGBUSY_TXSSIZEPEND                 BIT(18)
-#define TSB_I2S_REG_REGBUSY_MUTEPEND                    BIT(17)
-#define TSB_I2S_REG_REGBUSY_AUDIOSETPEND                BIT(16)
-#define TSB_I2S_REG_REGBUSY_MODESETBUSY                 BIT(3)
-#define TSB_I2S_REG_REGBUSY_TXSSIZEBUSY                 BIT(2)
-#define TSB_I2S_REG_REGBUSY_MUTEBUSY                    BIT(1)
-#define TSB_I2S_REG_REGBUSY_AUDIOSETBUSY                BIT(0)
-
-#define TSB_I2S_REG_MODESET_I2S_STEREO                  0x0
-#define TSB_I2S_REG_MODESET_LR_STEREO                   0x2
-#define TSB_I2S_REG_MODESET_LR_STEREO_REV_POL           0x3
-#define TSB_I2S_REG_MODESET_PCM_MONO                    0x4
-#define TSB_I2S_REG_MODESET_PCM_MONO_REV_POL            0x5
-#define TSB_I2S_REG_MODESET_WS_MASK                     0x7
-
-#define TSB_I2S_FLAG_OPEN                               BIT(0)
-#define TSB_I2S_FLAG_CONFIGURED                         BIT(1)
-#define TSB_I2S_FLAG_ENABLED                            BIT(2)
-#define TSB_I2S_FLAG_RX_PREPARED                        BIT(3)
-#define TSB_I2S_FLAG_RX_ACTIVE                          BIT(4)
-#define TSB_I2S_FLAG_TX_PREPARED                        BIT(5)
-#define TSB_I2S_FLAG_TX_ACTIVE                          BIT(6)
-
-enum tsb_i2s_block {
-    TSB_I2S_BLOCK_INVALID,
-    TSB_I2S_BLOCK_BRIDGE,
-    TSB_I2S_BLOCK_SC,
-    TSB_I2S_BLOCK_SO,
-    TSB_I2S_BLOCK_SI,
-};
-
-struct tsb_i2s_info {
-    struct device                   *dev;
-    struct device                   *pll_dev;
-    sem_t                           lock;
-    uint32_t                        flags;
-    struct ring_buf                 *rx_rb;
-    device_i2s_callback             rx_callback;
-    void                            *rx_arg;
-    struct ring_buf                 *tx_rb;
-    device_i2s_callback             tx_callback;
-    void                            *tx_arg;
-    uint32_t                        cg_base;
-    uint32_t                        sc_base;
-    uint32_t                        so_base;
-    uint32_t                        si_base;
-    int                             soerr_irq;
-    int                             so_irq;
-    int                             sierr_irq;
-    int                             si_irq;
-    struct device_i2s_configuration config;
-};
-
-/*
- * The nuttx IRQ handler interface doesn't provide an 'arg' parameter
- * where 'dev' can be passed so use a global for now.  Must be fixed to
- * support more than one tsb i2s controller.
- */
-static struct device *saved_dev;
-
-static int tsb_i2s_rx_data(struct tsb_i2s_info *info);
-static int tsb_i2s_tx_data(struct tsb_i2s_info *info);
 
 /*
  * TODO: The entire configuration method in the I2S spec needs to be redone -
@@ -801,8 +663,8 @@ static uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
     return base;
 }
 
-static uint32_t tsb_i2s_read_raw(struct tsb_i2s_info *info,
-                                 enum tsb_i2s_block block, unsigned int reg)
+uint32_t tsb_i2s_read_raw(struct tsb_i2s_info *info,
+                          enum tsb_i2s_block block, unsigned int reg)
 {
     uint32_t base;
 
@@ -813,9 +675,9 @@ static uint32_t tsb_i2s_read_raw(struct tsb_i2s_info *info,
     return getreg32(base + reg);
 }
 
-static void tsb_i2s_write_raw(struct tsb_i2s_info *info,
-                              enum tsb_i2s_block block,
-                              unsigned int reg, uint32_t val)
+void tsb_i2s_write_raw(struct tsb_i2s_info *info,
+                       enum tsb_i2s_block block,
+                       unsigned int reg, uint32_t val)
 {
     uint32_t base;
 
@@ -826,8 +688,8 @@ static void tsb_i2s_write_raw(struct tsb_i2s_info *info,
     putreg32(val, base + reg);
 }
 
-static uint32_t tsb_i2s_read(struct tsb_i2s_info *info,
-                             enum tsb_i2s_block block, unsigned int reg)
+uint32_t tsb_i2s_read(struct tsb_i2s_info *info,
+                      enum tsb_i2s_block block, unsigned int reg)
 {
     return le32_to_cpu(tsb_i2s_read_raw(info, block, reg));
 }
@@ -850,8 +712,8 @@ static void tsb_i2s_write_field(struct tsb_i2s_info *info,
     tsb_i2s_write(info, block, reg, v);
 }
 
-static void tsb_i2s_mask_irqs(struct tsb_i2s_info *info,
-                              enum tsb_i2s_block block, uint32_t mask)
+void tsb_i2s_mask_irqs(struct tsb_i2s_info *info,
+                       enum tsb_i2s_block block, uint32_t mask)
 {
     uint32_t v;
 
@@ -859,8 +721,8 @@ static void tsb_i2s_mask_irqs(struct tsb_i2s_info *info,
     tsb_i2s_write(info, block, TSB_I2S_REG_INTMASK, v | mask);
 }
 
-static void tsb_i2s_unmask_irqs(struct tsb_i2s_info *info,
-                                enum tsb_i2s_block block, uint32_t mask)
+void tsb_i2s_unmask_irqs(struct tsb_i2s_info *info,
+                         enum tsb_i2s_block block, uint32_t mask)
 {
     uint32_t v;
 
@@ -868,8 +730,8 @@ static void tsb_i2s_unmask_irqs(struct tsb_i2s_info *info,
     tsb_i2s_write(info, block, TSB_I2S_REG_INTMASK, v & ~mask);
 }
 
-static void tsb_i2s_clear_irqs(struct tsb_i2s_info *info,
-                               enum tsb_i2s_block block, uint32_t mask)
+void tsb_i2s_clear_irqs(struct tsb_i2s_info *info,
+                        enum tsb_i2s_block block, uint32_t mask)
 {
     tsb_i2s_write(info, block, TSB_I2S_REG_INTCLR, mask);
 }
@@ -1237,7 +1099,7 @@ err_irqrestore:
     return ret;
 }
 
-static void tsb_i2s_stop_receiver(struct tsb_i2s_info *info, int is_err)
+void tsb_i2s_stop_receiver(struct tsb_i2s_info *info, int is_err)
 {
     irqstate_t flags;
 
@@ -1288,7 +1150,7 @@ err_irqrestore:
     return ret;
 }
 
-static void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err)
+void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err)
 {
     irqstate_t flags;
 
@@ -1308,7 +1170,7 @@ static void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err)
     irqrestore(flags);
 }
 
-static enum device_i2s_event tsb_i2s_intstat2event(uint32_t intstat)
+enum device_i2s_event tsb_i2s_intstat2event(uint32_t intstat)
 {
     enum device_i2s_event event;
 
@@ -1324,207 +1186,6 @@ static enum device_i2s_event tsb_i2s_intstat2event(uint32_t intstat)
         event = DEVICE_I2S_EVENT_UNSPECIFIED;
 
     return event;
-}
-
-static uint32_t tsb_i2s_fifo_data(struct tsb_i2s_info *info, uint32_t w)
-{
-    uint16_t *hw;
-
-    /*
-     * The way FIFO data ordering works out when TSB_I2S_REG_AUDIOSET_DTFMT
-     * is cleared make little endian just work.
-     */
-    if (info->config.byte_order == DEVICE_I2S_BYTE_ORDER_BE) {
-        switch(info->config.bytes_per_channel) {
-        case 2:
-            hw = (uint16_t *)&w;
-
-            hw[0] = __swap32(hw[0]);
-            hw[1] = __swap32(hw[1]);
-            break;
-        case 3:
-            /*
-             * Only valid for 24-bit data in a 32-bit container
-             * (pad on MSB side).
-             */
-            /* FALLTHROUGH */
-        case 4:
-            if (info->config.byte_order == DEVICE_I2S_BYTE_ORDER_BE)
-                w = __swap32(w);
-            break;
-        }
-    }
-
-    return w;
-}
-
-static int tsb_i2s_drain_fifo(struct tsb_i2s_info *info,
-                              enum device_i2s_event *event)
-{
-    unsigned int i;
-    uint32_t intstat;
-    uint32_t *dp;
-    int ret = 0;
-
-    dp = ring_buf_get_tail(info->rx_rb);
-
-    for (i = 0; i < ring_buf_space(info->rx_rb); i += sizeof(*dp)) {
-        intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INTSTAT);
-
-        if (intstat & TSB_I2S_REG_INT_ERROR_MASK) {
-            *event = tsb_i2s_intstat2event(intstat);
-            ret = -EIO;
-            break;
-        }
-
-        if (!(intstat & TSB_I2S_REG_INT_INT))
-            break;
-
-        *dp++ = tsb_i2s_fifo_data(info, tsb_i2s_read_raw(info, TSB_I2S_BLOCK_SI,
-                                                         TSB_I2S_REG_LMEM00));
-
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI, intstat);
-    }
-
-    ring_buf_put(info->rx_rb, i);
-
-    return ret;
-}
-
-static int tsb_i2s_rx_data(struct tsb_i2s_info *info)
-{
-    enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
-    int ret = 0;
-
-    while (ring_buf_is_producers(info->rx_rb)) {
-        if (ring_buf_space(info->rx_rb) % 4) {
-            event = DEVICE_I2S_EVENT_DATA_LEN;
-            ret = -EINVAL;
-            break;
-        }
-
-        ret = tsb_i2s_drain_fifo(info, &event);
-        if (ret)
-            break;
-
-        if (!ring_buf_is_full(info->rx_rb)) {
-            /*
-             * The FIFO must be empty so unmask the irq and exit.  When there
-             * is data in the FIFO, the irq handler will call this routine and
-             * the FIFO will be drained again.
-             */
-            tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INT_INT);
-            return 0;
-        }
-
-        ring_buf_pass(info->rx_rb);
-
-        if (info->rx_callback)
-            info->rx_callback(info->rx_rb, DEVICE_I2S_EVENT_RX_COMPLETE,
-                              info->rx_arg);
-
-        info->rx_rb = ring_buf_get_next(info->rx_rb);
-    }
-
-    if (ret) {
-        tsb_i2s_stop_receiver(info, 1);
-
-        if (info->rx_callback)
-            info->rx_callback(info->rx_rb, event, info->rx_arg);
-    }
-
-    /*
-     * No room in the ring buffer so mask irq to prevent irq flood.
-     * This routine will be called again when there is room in the ring buffer.
-     */
-    tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INT_INT);
-
-    return ret;
-}
-
-static int tsb_i2s_fill_fifo(struct tsb_i2s_info *info,
-                             enum device_i2s_event *event)
-{
-    unsigned int i;
-    uint32_t intstat;
-    uint32_t *dp;
-    int ret = 0;
-
-    dp = (uint32_t *)ring_buf_get_head(info->tx_rb);
-
-    for (i = 0; i < ring_buf_len(info->tx_rb); i += sizeof(*dp)) {
-        intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INTSTAT);
-
-        if (intstat & TSB_I2S_REG_INT_ERROR_MASK) {
-            *event = tsb_i2s_intstat2event(intstat);
-            ret = -EIO;
-            break;
-        }
-
-        if (!(intstat & TSB_I2S_REG_INT_INT))
-            break;
-
-        tsb_i2s_write_raw(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_LMEM00,
-                          tsb_i2s_fifo_data(info, *dp++));
-
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO, intstat);
-    }
-
-    ring_buf_pull(info->tx_rb, i);
-
-    return ret;
-}
-
-static int tsb_i2s_tx_data(struct tsb_i2s_info *info)
-{
-    enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
-    int ret = 0;
-
-    while (ring_buf_is_consumers(info->tx_rb)) {
-        if (ring_buf_len(info->tx_rb) % 4) {
-            event = DEVICE_I2S_EVENT_DATA_LEN;
-            ret = -EINVAL;
-            break;
-        }
-
-        ret = tsb_i2s_fill_fifo(info, &event);
-        if (ret)
-            break;
-
-        if (!ring_buf_is_empty(info->tx_rb)) {
-            /*
-             * The FIFO must be full so unmask the irq and exit.  When there
-             * is room in the FIFO, the irq handler will call this routine and
-             * the FIFO will be filled again.
-             */
-            tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INT_INT);
-            return 0;
-        }
-
-        ring_buf_reset(info->tx_rb);
-        ring_buf_pass(info->tx_rb);
-
-        if (info->tx_callback)
-            info->tx_callback(info->tx_rb, DEVICE_I2S_EVENT_TX_COMPLETE,
-                              info->tx_arg);
-
-        info->tx_rb = ring_buf_get_next(info->tx_rb);
-    }
-
-    if (ret) {
-        tsb_i2s_stop_transmitter(info, 1);
-
-        if (info->tx_callback)
-            info->tx_callback(info->tx_rb, event, info->tx_arg);
-    }
-
-    /*
-     * No more data to send so mask the irq to prevent irq flood.
-     * This routine will be called again when there is more data.
-     */
-    tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INT_INT);
-
-    return ret;
 }
 
 static int tsb_i2s_irq_so_err_handler(int irq, void *context)
@@ -1549,21 +1210,6 @@ static int tsb_i2s_irq_so_err_handler(int irq, void *context)
     return OK;
 }
 
-static int tsb_i2s_irq_so_handler(int irq, void *context)
-{
-    struct tsb_i2s_info *info = device_get_private(saved_dev);
-    uint32_t intstat;
-
-    intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INTSTAT);
-
-    if (intstat & TSB_I2S_REG_INT_INT)
-        tsb_i2s_tx_data(info);
-    else
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO, intstat);
-
-    return OK;
-}
-
 static int tsb_i2s_irq_si_err_handler(int irq, void *context)
 {
     struct tsb_i2s_info *info = device_get_private(saved_dev);
@@ -1582,21 +1228,6 @@ static int tsb_i2s_irq_si_err_handler(int irq, void *context)
 
     if (info->rx_callback)
         info->rx_callback(info->rx_rb, event, info->rx_arg);
-
-    return OK;
-}
-
-static int tsb_i2s_irq_si_handler(int irq, void *context)
-{
-    struct tsb_i2s_info *info = device_get_private(saved_dev);
-    uint32_t intstat;
-
-    intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INTSTAT);
-
-    if (intstat & TSB_I2S_REG_INT_INT)
-        tsb_i2s_rx_data(info);
-    else
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI, intstat);
 
     return OK;
 }
@@ -2032,17 +1663,13 @@ static int tsb_i2s_dev_probe(struct device *dev)
     if (ret != OK)
         goto err_irqrestore;
 
-    ret = irq_attach(info->so_irq, tsb_i2s_irq_so_handler);
+    ret = tsb_attach_xfer_irqs(info);
     if (ret != OK)
         goto err_detach_soerr_irq;
 
     ret = irq_attach(info->sierr_irq, tsb_i2s_irq_si_err_handler);
     if (ret != OK)
         goto err_detach_so_irq;
-
-    ret = irq_attach(info->si_irq, tsb_i2s_irq_si_handler);
-    if (ret != OK)
-        goto err_detach_sierr_irq;
 
 #if defined(CONFIG_TSB_CHIP_REV_ES2)
     tsb_clr_pinshare(TSB_PIN_ETM);
@@ -2060,10 +1687,8 @@ static int tsb_i2s_dev_probe(struct device *dev)
 
     return 0;
 
-err_detach_sierr_irq:
-    irq_detach(info->sierr_irq);
 err_detach_so_irq:
-    irq_detach(info->so_irq);
+    tsb_detach_xfer_irqs(info);
 err_detach_soerr_irq:
     irq_detach(info->soerr_irq);
 err_irqrestore:
