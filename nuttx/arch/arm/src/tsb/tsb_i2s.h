@@ -164,6 +164,8 @@ struct tsb_i2s_info {
 };
 
 /* Utility functions used by the data movement routines */
+uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
+                                enum tsb_i2s_block block);
 uint32_t tsb_i2s_read_raw(struct tsb_i2s_info *info,
                           enum tsb_i2s_block block, unsigned int reg);
 uint32_t tsb_i2s_read(struct tsb_i2s_info *info,
@@ -184,6 +186,13 @@ enum device_i2s_event tsb_i2s_intstat2event(uint32_t intstat);
 
 
 /* Data movement routines provided by tsb_i2s_xfer,c or tsb_i2s_xfer_dma.c */
+uint32_t    g_xfer_intr_flag;
+int tsb_i2s_xfer_open(struct tsb_i2s_info *info);
+void tsb_i2s_xfer_close(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_prepare_receiver(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_shutdown_receiver(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_prepare_transmitter(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_shutdown_transmitter(struct tsb_i2s_info *info);
 int tsb_attach_xfer_irqs(struct tsb_i2s_info *info);
 int tsb_detach_xfer_irqs(struct tsb_i2s_info *info);
 int tsb_i2s_rx_data(struct tsb_i2s_info *info);

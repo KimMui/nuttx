@@ -638,8 +638,8 @@ static int tsb_i2s_tx_is_active(struct tsb_i2s_info *info)
            (info->flags & TSB_I2S_FLAG_TX_ACTIVE);
 }
 
-static uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
-                                       enum tsb_i2s_block block)
+uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
+                                enum tsb_i2s_block block)
 {
     uint32_t base;
 
@@ -1077,7 +1077,7 @@ static int tsb_i2s_start_receiver(struct tsb_i2s_info *info)
                        TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
     tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SI,
                         TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                        TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                        TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
 
     ret = tsb_i2s_start(info, TSB_I2S_BLOCK_SI);
     if (ret)
@@ -1092,7 +1092,7 @@ static int tsb_i2s_start_receiver(struct tsb_i2s_info *info)
 err_mask_irqs:
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
 err_irqrestore:
     irqrestore(flags);
 
@@ -1109,10 +1109,10 @@ void tsb_i2s_stop_receiver(struct tsb_i2s_info *info, int is_err)
 
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
     tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI,
                        TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                       TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
 
     info->flags &= ~TSB_I2S_FLAG_RX_ACTIVE;
 
@@ -1130,8 +1130,8 @@ static int tsb_i2s_start_transmitter(struct tsb_i2s_info *info)
         tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO,
                            TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
                            TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
-        /* TSB_I2S_REG_INT_INT is unmasked in tsb_i2s_tx_data() */
         tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SO,
+                            g_xfer_intr_flag |
                             TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
                             TSB_I2S_REG_INT_OR);
 
@@ -1160,10 +1160,10 @@ void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err)
 
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SO,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
     tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO,
                        TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                       TSB_I2S_REG_INT_OR | g_xfer_intr_flag);
 
     info->flags &= ~TSB_I2S_FLAG_TX_ACTIVE;
 
@@ -1316,6 +1316,11 @@ static int tsb_i2s_op_prepare_receiver(struct device *dev,
 
     info->flags |= TSB_I2S_FLAG_RX_PREPARED;
 
+    ret = tsb_i2s_xfer_prepare_receiver(info);
+    if (ret != OK) {
+        goto err_disable;
+    }
+
     sem_post(&info->lock);
 
     return 0;
@@ -1375,6 +1380,11 @@ static int tsb_i2s_op_shutdown_receiver(struct device *dev)
     int ret = 0;
 
     sem_wait(&info->lock);
+
+    if (tsb_i2s_xfer_shutdown_receiver(info) != OK) {
+        ret = -EBUSY;
+        goto err_unlock;
+    }
 
     if (tsb_i2s_rx_is_active(info)) {
         ret = -EBUSY;
@@ -1445,6 +1455,9 @@ static int tsb_i2s_op_prepare_transmitter(struct device *dev,
     up_enable_irq(info->soerr_irq);
     up_enable_irq(info->so_irq);
 
+    if (tsb_i2s_xfer_prepare_transmitter(info) != OK) {
+        goto err_disable;
+    }
     sem_post(&info->lock);
 
     return 0;
@@ -1464,6 +1477,11 @@ static int tsb_i2s_op_start_transmitter(struct device *dev)
     int ret = 0;
 
     sem_wait(&info->lock);
+
+    if (tsb_i2s_xfer_shutdown_transmitter(info) != OK) {
+        ret = -EIO;
+        goto err_unlock;
+    }
 
     if (!tsb_i2s_tx_is_prepared(info)) {
         ret = -EIO;
@@ -1547,7 +1565,10 @@ static int tsb_i2s_dev_open(struct device *dev)
         goto err_unlock;
     }
 
-    info->flags = TSB_I2S_FLAG_OPEN;
+    ret = tsb_i2s_xfer_open(info);
+    if (ret == OK) {
+        info->flags = TSB_I2S_FLAG_OPEN;
+    }
 
 err_unlock:
     sem_post(&info->lock);
@@ -1575,6 +1596,8 @@ static void tsb_i2s_dev_close(struct device *dev)
 
     if (tsb_i2s_tx_is_prepared(info))
         tsb_i2s_op_shutdown_transmitter(dev);
+
+    tsb_i2s_xfer_close(info);
 
     info->flags = 0;
 

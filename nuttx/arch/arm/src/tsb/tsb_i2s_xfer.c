@@ -191,6 +191,15 @@ static int tsb_i2s_fill_fifo(struct tsb_i2s_info *info,
 
         if (!(intstat & TSB_I2S_REG_INT_INT))
             break;
+        int tsb_attach_xfer_irqs(struct tsb_i2s_info *info)
+        {
+            return OK;
+        }
+
+        int tsb_detach_xfer_irqs(struct tsb_i2s_info *info)
+        {
+            return OK;
+        }
 
         tsb_i2s_write_raw(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_LMEM00,
                           tsb_i2s_fifo_data(info, *dp++));
@@ -316,5 +325,36 @@ int tsb_detach_xfer_irqs(struct tsb_i2s_info *info)
     }
 
     return irq_detach(info->si_irq);
+}
+
+/* Nothing need to be done in the following routines if we use SW pulling */
+int tsb_i2s_xfer_open(struct tsb_i2s_info *info)
+{
+    return OK;
+}
+
+void tsb_i2s_xfer_close(struct tsb_i2s_info *info)
+{
+    return;
+}
+
+int tsb_i2s_xfer_prepare_receiver(struct tsb_i2s_info *info)
+{
+    return OK;
+}
+
+int tsb_i2s_xfer_shutdown_receiver(struct tsb_i2s_info *info)
+{
+    return OK;
+}
+
+int tsb_i2s_xfer_prepare_transmitter(struct tsb_i2s_info *info)
+{
+    return OK;
+}
+
+int tsb_i2s_xfer_shutdown_transmitter(struct tsb_i2s_info *info)
+{
+    return OK;
 }
 
