@@ -32,6 +32,7 @@
 
 #ifdef CONFIG_ARCH_CHIP_DEVICE_GDMAC
 extern struct device_driver tsb_dma_driver;
+extern struct device_driver tsb_atabl_driver;
 #endif
 extern struct device_driver tsb_usb_hcd_driver;
 extern struct device_driver tsb_usb_pcd_driver;
@@ -46,6 +47,7 @@ void tsb_driver_register(void)
 {
 #ifdef CONFIG_ARCH_CHIP_DEVICE_GDMAC
     device_register_driver(&tsb_dma_driver);
+    device_register_driver(&tsb_atabl_driver);
 #endif
 
 #ifdef CONFIG_ARCH_CHIP_USB_HCD

@@ -38,6 +38,7 @@
 #include <nuttx/list.h>
 #include <nuttx/unipro/unipro.h>
 #include <nuttx/device_dma.h>
+#include <nuttx/device_atabl.h>
 
 #include "debug.h"
 #include "up_arch.h"
@@ -49,6 +50,12 @@
 
 #define UNIPRO_DMA_CHANNEL_COUNT CONFIG_ARCH_UNIPROTX_DMA_NUM_CHANNELS
 
+struct dma_channel {
+    void *chan;
+    void *req;
+    unsigned int cportid;
+};
+
 struct unipro_xfer_descriptor {
     struct cport *cport;
     const void *data;
@@ -58,7 +65,7 @@ struct unipro_xfer_descriptor {
     unipro_send_completion_t callback;
 
     size_t data_offset;
-    void *channel;
+    struct dma_channel *channel;
 
     struct list_head list;
 };
@@ -75,15 +82,19 @@ static struct {
 
 static struct {
     struct device *dev;
-    void *channel[UNIPRO_DMA_CHANNEL_COUNT];
+    struct device *atabl_dev;
+    struct dma_channel dma_channels[UNIPRO_DMA_CHANNEL_COUNT];
+
     struct list_head free_channel_list;
     sem_t dma_channel_lock;
     int max_channel;
 } unipro_dma;
 
-static void *pick_dma_channel(struct cport *cport)
+static struct dma_channel *pick_dma_channel(struct cport *cport)
 {
-    void *chan = unipro_dma.channel[cport->cportid % unipro_dma.max_channel];
+    struct dma_channel *chan;
+
+    chan = &unipro_dma.dma_channels[cport->cportid % unipro_dma.max_channel];
 
     return chan;
 }
@@ -190,6 +201,53 @@ static int unipro_dma_tx_callback(struct device *dev, void *chan,
         struct device_dma_op *op, unsigned int event, void *arg)
 {
     struct unipro_xfer_descriptor *desc = arg;
+    int retval = OK;
+
+    if (event & DEVICE_DMA_CALLBACK_EVENT_START) {
+#if 1
+        int req_activated = 0;
+        struct dma_channel *desc_chan = desc->channel;
+
+        //lldbg("===> op start. %x, %x\n", desc_chan, &desc_chan);
+
+        if (desc_chan->cportid != 0xFFFF) {
+            req_activated = device_atabl_req_is_activated(unipro_dma.atabl_dev,
+                                                          desc_chan->req);
+        }
+        if (req_activated != 0) {
+            // lldbg("Error: device is running(%x).\n", retval);
+            device_atabl_deactivate_req(unipro_dma.atabl_dev,
+                                        desc_chan->req);
+        }
+
+        if (desc_chan->cportid != desc->cport->cportid) {
+            if (desc_chan->cportid != 0xFFFF) {
+                // lldbg("Disconnect cport %d\n", desc_chan->cportid);
+                device_atabl_disconnect_cport_to_req(unipro_dma.atabl_dev,
+                        desc_chan->req);
+            }
+
+            // lldbg("Connect cport %d\n", desc->cport->cportid);
+            retval = device_atabl_connect_cport_to_req(unipro_dma.atabl_dev,
+                             desc->cport->cportid, desc_chan->req);
+            if (retval != OK) {
+                lldbg("Error: Failed to connect cport to REQn\n");
+            }
+        }
+        // lldbg("Activate cport %d\n", desc->cport->cportid);
+        retval = device_atabl_activate_req(unipro_dma.atabl_dev,
+                                           desc_chan->req);
+
+        if (retval != OK) {
+            lldbg("Error: Failed to activate cport %d on REQn\n",
+                  desc->cport->cportid);
+        } else {
+            desc_chan->cportid = desc->cport->cportid;
+        }
+#else
+        lldbg("---> %x\n", event);
+#endif
+    }
 
     if (event & DEVICE_DMA_CALLBACK_EVENT_COMPLETE) {
         if (desc->data_offset >= desc->len) {
@@ -212,7 +270,8 @@ static int unipro_dma_tx_callback(struct device *dev, void *chan,
     return OK;
 }
 
-static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc, void *channel)
+static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc,
+                           struct dma_channel *channel)
 {
     int retval;
     size_t xfer_len;
@@ -235,7 +294,8 @@ static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc, void *channel)
 
     dma_op->callback = (void *) unipro_dma_tx_callback;
     dma_op->callback_arg = desc;
-    dma_op->callback_events = DEVICE_DMA_CALLBACK_EVENT_COMPLETE;
+    dma_op->callback_events = DEVICE_DMA_CALLBACK_EVENT_COMPLETE |
+                              DEVICE_DMA_CALLBACK_EVENT_START;
     dma_op->sg_count = 1;
     dma_op->sg[0].len = xfer_len;
 
@@ -246,7 +306,7 @@ static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc, void *channel)
 
     /* resuming a paused xfer */
     if (desc->data_offset != 0) {
-        cport_buf = (char*) cport_buf + sizeof(uint32_t); /* skip the first DWORD */
+        cport_buf = (char*) cport_buf + sizeof(uint64_t); /* skip the first DWORD */
 
         /* move buffer offset to the beginning of the remaning bytes to xfer */
         xfer_buf = (char*) xfer_buf + desc->data_offset;
@@ -257,7 +317,7 @@ static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc, void *channel)
 
     desc->data_offset += xfer_len;
 
-    retval = device_dma_enqueue(unipro_dma.dev, channel, dma_op);
+    retval = device_dma_enqueue(unipro_dma.dev, channel->chan, dma_op);
     if (retval) {
         lowsyslog("unipro: failed to start DMA transfer: %d\n", retval);
         return retval;
@@ -386,12 +446,26 @@ int unipro_tx_init(void)
         return -ENODEV;
     }
 
+    unipro_dma.atabl_dev = device_open(DEVICE_TYPE_ATABL_HW, 0);
+    if (!unipro_dma.atabl_dev) {
+        lldbg("Failed to open ATABL driver.\n");
+
+        device_close(unipro_dma.dev);
+        return -ENODEV;
+    }
+
     unipro_dma.max_channel = 0;
     list_init(&unipro_dma.free_channel_list);
     avail_chan = device_dma_chan_free_count(unipro_dma.dev);
 
-    if (avail_chan > ARRAY_SIZE(unipro_dma.channel)) {
-        avail_chan = ARRAY_SIZE(unipro_dma.channel);
+    if (avail_chan > ARRAY_SIZE(unipro_dma.dma_channels)) {
+        avail_chan = ARRAY_SIZE(unipro_dma.dma_channels);
+    }
+
+    if (device_atabl_req_free_count(unipro_dma.atabl_dev) < avail_chan) {
+        device_close(unipro_dma.dev);
+        device_close(unipro_dma.atabl_dev);
+        return -ENODEV;
     }
 
     for (i = 0; i < avail_chan; i++) {
@@ -399,7 +473,7 @@ int unipro_tx_init(void)
                 .src_dev = DEVICE_DMA_DEV_MEM,
                 .src_devid = 0,
                 .src_inc_options = DEVICE_DMA_INC_AUTO,
-                .dst_dev = DEVICE_DMA_DEV_MEM,
+                .dst_dev = DEVICE_DMA_DEV_UNIPRO,
                 .dst_devid = 0,
                 .dst_inc_options = DEVICE_DMA_INC_AUTO,
                 .transfer_size = DEVICE_DMA_TRANSFER_SIZE_64,
@@ -407,14 +481,26 @@ int unipro_tx_init(void)
                 .swap = DEVICE_DMA_SWAP_SIZE_NONE,
         };
 
-        device_dma_chan_alloc(unipro_dma.dev, &chan_params,
-                &unipro_dma.channel[i]);
-
-        if (unipro_dma.channel[i] == NULL) {
-            lowsyslog("unipro: couldn't allocate all %u requested channel(s)\n",
-                    ARRAY_SIZE(unipro_dma.channel));
+        if (device_atabl_req_alloc(unipro_dma.atabl_dev,
+                                   &unipro_dma.dma_channels[i].req)) {
             break;
         }
+
+        chan_params.dst_devid = device_atabl_req_to_peripheral_id(
+                                    unipro_dma.atabl_dev,
+                                    unipro_dma.dma_channels[i].req);
+
+        lldbg("==> %d\n", chan_params.dst_devid);
+
+        device_dma_chan_alloc(unipro_dma.dev, &chan_params,
+                              &unipro_dma.dma_channels[i].chan);
+
+        if (unipro_dma.dma_channels[i].chan == NULL) {
+            lowsyslog("unipro: couldn't allocate all %u requested channel(s)\n",
+                    ARRAY_SIZE(unipro_dma.dma_channels));
+            break;
+        }
+        unipro_dma.dma_channels[i].cportid = 0xFFFF;
 
         unipro_dma.max_channel++;
     }
@@ -438,13 +524,17 @@ int unipro_tx_init(void)
 error_worker_create:
 
     for (i = 0; i < unipro_dma.max_channel; i++) {
-        device_dma_chan_free(unipro_dma.dev, &unipro_dma.channel[i]);
+        device_atabl_req_free(unipro_dma.atabl_dev,
+                             &unipro_dma.dma_channels[i].req);
+        device_dma_chan_free(unipro_dma.dev,
+                             &unipro_dma.dma_channels[i].chan);
     }
 
     unipro_dma.max_channel = 0;
 
 error_no_channel:
     device_close(unipro_dma.dev);
+    device_close(unipro_dma.atabl_dev);
     unipro_dma.dev = NULL;
 
     return retval;

@@ -48,6 +48,10 @@
 #include "tsb_dma_gdmac_asm.h"
 #include "tsb_dma.h"
 
+//#define NO_MEM2MEM_SUPPORT
+#define NO_MEM2IO_SUPPORT
+//#define NO_IO2MEM_SUPPORT
+
 #define GDMAC_MAX_DESC              2
 
 #define GDMAC_NUMBER_OF_CHANNELS    8
@@ -201,6 +205,7 @@ union peripheral_instr {
     uint16_t value;
 };
 
+#ifndef NO_MEM2MEM_SUPPORT
 /* structure for memory to memory transfer channel information. */
 struct __attribute__ ((__packed__)) mem2mem_pl330_code {
     GDMAC_INSTR_DMAMOV(source_addr);
@@ -227,7 +232,38 @@ struct __attribute__ ((__packed__)) mem2mem_pl330_code {
     uint8_t final_store;
     uint8_t pad3[DMA_LPEND_SIZE];
 };
+#endif
 
+/* structure for memory to unipro transfer channel information. */
+struct __attribute__ ((__packed__)) mem2unipro_pl330_code {
+    GDMAC_INSTR_DMAMOV(source_addr);
+    GDMAC_INSTR_DMAMOV(dest_addr);
+#if 0
+    GDMAC_INSTR_DMAMOV(chan_ctrl_reg);
+    GDMAC_INSTR_DMALP(init_dst_align_count);
+    uint16_t init_dst_align_load_and_store;
+    uint8_t pad0[DMA_LPEND_SIZE];
+#endif
+    GDMAC_INSTR_DMAMOV(preburst_load_chan_ctrl_reg);
+    uint8_t preburst_load;
+    GDMAC_INSTR_DMAMOV(burst_block_chan_ctrl_reg);
+    GDMAC_INSTR_DMALP(burst_block_count);
+    uint16_t burst_block_load_and_store;
+    uint8_t pad1[DMA_LPEND_SIZE];
+    GDMAC_INSTR_DMAMOV(postburst_block_chan_ctrl_reg);
+    uint16_t postburst_block_load_and_store;
+    GDMAC_INSTR_DMAMOV(postburst_chan_ctrl_reg);
+    GDMAC_INSTR_DMALP(postburst_load_count);
+    uint8_t postburst_load;
+    uint8_t pad2[DMA_LPEND_SIZE];
+    uint8_t postburst_store;
+    GDMAC_INSTR_DMAMOV(final_store_chan_ctrl_reg);
+    GDMAC_INSTR_DMALP(final_store_count);
+    uint8_t final_store;
+    uint8_t pad3[DMA_LPEND_SIZE];
+};
+
+#ifndef NO_MEM2IO_SUPPORT
 /* structure for memory to IO transfer channel information. */
 struct __attribute__((__packed__)) mem2io_pl330_code {
         GDMAC_INSTR_DMAMOV(source_addr);
@@ -262,7 +298,9 @@ struct __attribute__((__packed__)) mem2io_pl330_code {
         uint16_t final_store;
         uint8_t pad30[DMA_LPEND_SIZE];
 };
+#endif
 
+#ifndef NO_IO2MEM_SUPPORT
 /* structure for IO to memory transfer channel information. */
 struct __attribute__((__packed__)) io2mem_pl330_code {
         GDMAC_INSTR_DMAMOV(source_addr);
@@ -294,6 +332,7 @@ struct __attribute__((__packed__)) io2mem_pl330_code {
         uint8_t final_store;
         uint8_t pad30[DMA_LPEND_SIZE];
 };
+#endif
 
 struct __attribute__((__packed__)) pl330_end_code {
     uint8_t pad0[DMA_WMB_SIZE];
@@ -301,6 +340,7 @@ struct __attribute__((__packed__)) pl330_end_code {
     uint8_t pad1[DMA_END_SIZE];
 };
 
+#ifndef NO_MEM2MEM_SUPPORT
 struct mem_to_mem_chan {
     uint32_t burst_size;
     uint32_t burst_len;
@@ -311,7 +351,20 @@ struct mem_to_mem_chan {
     /* Channel program. */
     struct mem2mem_pl330_code pl330_code[0];
 };
+#endif
 
+struct mem_to_unipro_chan {
+    uint32_t burst_size;
+    uint32_t burst_len;
+    uint32_t ccr_transfer_size;
+    uint32_t burst_block_size;
+    uint32_t align_mask;
+    uint32_t ccr_base_value;
+    /* Channel program. */
+    struct mem2unipro_pl330_code pl330_code[0];
+};
+
+#ifndef NO_MEM2IO_SUPPORT
 struct mem_to_io_chan {
     uint32_t burst_size;
     uint32_t burst_len;
@@ -323,7 +376,9 @@ struct mem_to_io_chan {
     /* Channel program. */
     struct mem2io_pl330_code pl330_code[0];
 };
+#endif
 
+#ifndef NO_IO2MEM_SUPPORT
 struct io_to_mem_chan {
     uint32_t burst_size;
     uint32_t burst_len;
@@ -335,6 +390,7 @@ struct io_to_mem_chan {
     /* Channel program. */
     struct io2mem_pl330_code pl330_code[0];
 };
+#endif
 
 typedef int (*gdmac_transfer)(struct device *dev, struct tsb_dma_chan *chan,
         struct device_dma_op *op, enum device_dma_error *error);
@@ -356,12 +412,20 @@ struct gdmac_chan {
     uint32_t ccr_base_value;
 
     union {
+        struct mem_to_unipro_chan mem2unipro_chan;
+#ifndef NO_MEM2MEM_SUPPORT
         struct mem_to_mem_chan mem2mem_chan;
+#endif
+#ifndef NO_MEM2IO_SUPPORT
         struct mem_to_io_chan mem2io_chan;
+#endif
+#ifndef NO_IO2MEM_SUPPORT
         struct io_to_mem_chan io2mem_chan;
+#endif
     };
 };
 
+#ifndef NO_MEM2MEM_SUPPORT
 /* template for memory to memory GDMAC binary code. */
 static const uint8_t gdmac_mem2mem_program[] = {
         DMAMOV(sar, 0),
@@ -391,7 +455,41 @@ static const uint8_t gdmac_mem2mem_program[] = {
         DMAST,
         DMALPEND(lc0, DMA_LD_SIZE),
     };
+#endif
 
+/* template for memory to unipro GDMAC binary code. */
+static const uint8_t gdmac_mem2unipro_program[] = {
+        DMAMOV(sar, 0),
+        DMAMOV(dar, 0),
+#if 0
+        DMAMOV(ccr, 0x01C04701),
+        DMALP(lc0, 0),
+        DMALD,
+        DMAST,
+        DMALPEND(lc0, DMA_LD_SIZE + DMA_ST_SIZE),
+#endif
+        DMAMOV(ccr, 0),
+        DMALD,
+        DMAMOV(ccr, 0),
+        DMALP(lc0, 0),
+        DMALD,
+        DMAST,
+        DMALPEND(lc0, DMA_LD_SIZE + DMA_ST_SIZE),
+        DMAMOV(ccr, 0),
+        DMALD,
+        DMAST,
+        DMAMOV(ccr, 0),
+        DMALP(lc0, 0),
+        DMALD,
+        DMALPEND(lc0, DMA_LD_SIZE),
+        DMAST,
+        DMAMOV(ccr, 0),
+        DMALP(lc0, 0),
+        DMAST,
+        DMALPEND(lc0, DMA_LD_SIZE),
+    };
+
+#ifndef NO_MEM2IO_SUPPORT
 /* template for memory to io GDMAC binary code. */
 static const uint8_t gdmac_mem2io_program[] = {
         DMAMOV(sar, 0),
@@ -428,7 +526,9 @@ static const uint8_t gdmac_mem2io_program[] = {
         DMASTPB(0),
         DMALPEND(lc0, DMA_LD_SIZE),
     };
+#endif
 
+#ifndef NO_IO2MEM_SUPPORT
 /* template for io to memory GDMAC binary code. */
 static const uint8_t gdmac_io2mem_program[] = {
         DMAMOV(sar, 0),
@@ -462,6 +562,7 @@ static const uint8_t gdmac_io2mem_program[] = {
         DMAST,
         DMALPEND(lc0, DMA_LD_SIZE),
     };
+#endif
 
 static const uint8_t gdmac_pl330_end_code[] = {
         DMAWMB,
@@ -579,6 +680,7 @@ int gdmac_irq_handler(int irq, void *context)
     return OK;
 }
 
+#ifndef NO_MEM2MEM_SUPPORT
 void gdmac_mem2mem_release_channel(struct tsb_dma_chan *tsb_chan)
 {
     struct gdmac_chan *gdmac_chan =
@@ -757,6 +859,7 @@ static int gdmac_mem2mem_transfer(struct device *dev,
     return retval;
 }
 
+
 /* Allocate an UniPro TX channel. */
 int tsb_gdmac_allocal_mem2Mem_chan(struct device *dev,
         struct device_dma_params *params, struct tsb_dma_chan **tsb_chan)
@@ -868,7 +971,309 @@ int tsb_gdmac_allocal_mem2Mem_chan(struct device *dev,
 
     return retval;
 }
+#endif
 
+void gdmac_mem2unipro_release_channel(struct tsb_dma_chan *tsb_chan)
+{
+    struct gdmac_chan *gdmac_chan =
+            containerof(tsb_chan, struct gdmac_chan, tsb_chan);
+
+    gdmac_release_event(gdmac_chan->end_of_tx_event);
+
+    free(gdmac_chan);
+}
+
+static int gdmac_mem2unipro_transfer(struct device *dev,
+        struct tsb_dma_chan *tsb_chan, struct device_dma_op *op,
+        enum device_dma_error *error)
+{
+    struct gdmac_chan
+    *gdmac_chan = containerof(tsb_chan, struct gdmac_chan, tsb_chan);
+
+    struct mem_to_unipro_chan *mem2unipro_chan = &gdmac_chan->mem2unipro_chan;
+    uint32_t desc_index;
+    struct mem2unipro_pl330_code *pl330_code;
+
+    int retval = OK;
+
+    if (op->sg_count > GDMAC_MAX_DESC) {
+        lldbg("Error: too many descriptors.");
+        return -EINVAL;
+    }
+
+    pl330_code = &mem2unipro_chan->pl330_code[GDMAC_MAX_DESC - op->sg_count];
+    for (desc_index = 0; desc_index < op->sg_count; desc_index++) {
+        uint32_t load_len;
+        uint32_t store_len;
+        uint32_t align_mask = mem2unipro_chan->align_mask;
+        uint32_t total_load_len;
+        uint32_t total_store_len;
+        uint32_t count;
+        struct device_dma_sg *sg = &op->sg[desc_index];
+        uint32_t src_addr = (uint32_t) sg->src_addr;
+        uint32_t dst_addr = (uint32_t) sg->dst_addr;
+        size_t data_len = sg->len;
+
+        /* Set source and destination addresses, as well as the data count. */
+        pl330_code->source_addr.value = (uint32_t) sg->src_addr;
+        pl330_code->dest_addr.value = (uint32_t) sg->dst_addr;
+
+#if 0
+        /* We need to copy the first few bytes to make ensure the destination
+         * address is aligned before we do multi-bytes store, otherwise the
+         * memory location before destination address might end up with some
+         * undefine values. It appears unaligned store only works on the bus
+         * width of the device.
+         */
+        store_len = (uint32_t)sg->dst_addr & align_mask;
+        if (store_len != 0) {
+            store_len = align_mask - store_len + 1;
+            store_len = MIN(store_len, data_len);
+
+            pl330_code->init_dst_align_count.value = (uint8_t)(store_len - 1);
+            pl330_code->init_dst_align_load_and_store = DMA_LOADANDSTORE;
+
+            src_addr += store_len;
+            dst_addr += store_len;
+            data_len -= store_len;
+
+            store_len = 0;
+        } else {
+            pl330_code->init_dst_align_count.value = 0;
+            pl330_code->init_dst_align_load_and_store = DMA_NO_LOADANDSTORE;
+        }
+#else
+        /* To avoid extra over head, the destination address for Unipro TX
+         * must be aligned with burst length.
+         */
+        store_len = (uint32_t)sg->dst_addr & align_mask;
+        if (store_len != 0) {
+            lldbg("Unipro destination address must be aligned.\n");
+            return -EINVAL;
+        }
+#endif
+        load_len = (uint32_t)src_addr & align_mask;
+
+        /* Now, we are ready to use multi-bytes and burst load and store. We
+         * need to check if we need to do a preload before we get into
+         * bursting blocks of memory.
+         */
+        total_load_len = data_len;
+        total_store_len = data_len;
+
+        /* Adjust the length of source by taking the unalignement data count
+         * so we don't need to have messy calculation later on.
+         */
+        if (((src_addr + data_len) & align_mask) < data_len) {
+            total_load_len += (src_addr & align_mask);
+            if (load_len > store_len) {
+                pl330_code->preburst_load = DMALD;
+                total_load_len -= mem2unipro_chan->burst_size;
+            } else {
+                pl330_code->preburst_load = DMANOP;
+            }
+        }
+
+        /* Adjust the length of destination by taking the unalignement data
+         * data so we don't need to have messy calculation later on.
+         */
+        if (((dst_addr + data_len) & align_mask) < data_len) {
+            total_store_len += (dst_addr & align_mask);
+        }
+
+        /* Do blocks of complete burst of data load and store */
+        count = total_load_len / mem2unipro_chan->burst_block_size;
+        if (count > 0) {
+            pl330_code->burst_block_count.value = count - 1;
+            pl330_code->burst_block_load_and_store = DMA_LOADANDSTORE;
+            load_len = mem2unipro_chan->burst_block_size * count;
+            total_load_len -= load_len;
+            total_store_len -= load_len;
+        } else {
+            pl330_code->burst_block_count.value = 0;
+            pl330_code->burst_block_load_and_store = DMA_NO_LOADANDSTORE;
+        }
+
+        /* Do the last burst of data load and store with the burst length less
+         * than the channel's burst length.
+         */
+        count = total_load_len / mem2unipro_chan->burst_size;
+        if (count > 0) {
+            pl330_code->postburst_block_chan_ctrl_reg.value =
+                    mem2unipro_chan->ccr_base_value |
+                    CCR_DST_CONFIG(count, mem2unipro_chan->ccr_transfer_size) |
+                    CCR_SRC_CONFIG(count, mem2unipro_chan->ccr_transfer_size);
+            pl330_code->postburst_block_load_and_store = DMA_LOADANDSTORE;
+            load_len = mem2unipro_chan->burst_size * count;
+            load_len = count << 3;
+            total_load_len -= load_len;
+            total_store_len -= load_len;
+        } else {
+            pl330_code->postburst_block_chan_ctrl_reg.value =
+                    mem2unipro_chan->ccr_base_value |
+                    CCR_DST_CONFIG(1, mem2unipro_chan->ccr_transfer_size) |
+                    CCR_SRC_CONFIG(1, mem2unipro_chan->ccr_transfer_size);
+            pl330_code->postburst_block_load_and_store = DMA_NO_LOADANDSTORE;
+        }
+
+        /* If we still have some data left unread, finish loading them */
+        if (total_load_len > 0) {
+            pl330_code->postburst_load_count.value =
+                    (uint8_t)(total_load_len - 1);
+            pl330_code->postburst_load = DMALD;
+            total_load_len = 0;
+        } else {
+            pl330_code->postburst_load_count.value = 0;
+            pl330_code->postburst_load = DMANOP;
+        }
+
+        /* If the there is enouph data to do a multi-bytes transfer, perform a
+         * multi-byte transfer.
+         */
+        if (total_store_len >= mem2unipro_chan->burst_size) {
+            pl330_code->postburst_store = DMAST;
+            total_store_len -= mem2unipro_chan->burst_size;
+        } else {
+            pl330_code->postburst_store = DMANOP;
+        }
+
+        /* If we still have some data left in the MFIFO, flush them out */
+        if (total_store_len > 0) {
+            pl330_code->final_store_count.value =
+                    (uint8_t)(total_store_len - 1);
+            pl330_code->final_store = DMAST;
+            total_store_len -= total_store_len;
+        } else {
+            pl330_code->final_store_count.value = 0;
+            pl330_code->final_store = DMANOP;
+        }
+
+        pl330_code++;
+    }
+
+    pl330_code = &mem2unipro_chan->pl330_code[GDMAC_MAX_DESC - op->sg_count];
+    /* Start the transfer and wait for end of transfer interrupt. */
+    if (dma_start_thread(tsb_chan->chan_id, (uint8_t *)pl330_code)
+            == false) {
+        retval = -EIO;
+    }
+
+    return retval;
+}
+
+/* Allocate an UniPro TX channel. */
+int tsb_gdmac_allocal_mem2unipro_chan(struct device *dev,
+        struct device_dma_params *params, struct tsb_dma_chan **tsb_chan)
+{
+    int retval = OK;
+    struct mem_to_unipro_chan *mem2unipro_chan;
+    struct gdmac_chan *gdmac_chan;
+    struct tsb_dma_gdmac_control_regs *control_regs =
+            (struct tsb_dma_gdmac_control_regs*) GDMAC_CONTROL_REGS_ADDRESS;
+    uint32_t desc_index;
+    struct mem2unipro_pl330_code *pl330_code;
+    uint32_t burst_size;
+    uint32_t burst_len;
+    uint32_t ccr_transfer_size;
+
+    gdmac_chan = bufram_alloc(sizeof(struct gdmac_chan) +
+            GDMAC_MAX_DESC * sizeof(struct mem2unipro_pl330_code) +
+            sizeof(struct pl330_end_code));
+    if (gdmac_chan == NULL) {
+        return -ENOMEM;
+    }
+
+    /* allocate an end of transfer event; */
+    retval = gdmac_allocate_event(gdmac_chan,
+            DEVICE_DMA_CALLBACK_EVENT_COMPLETE, &gdmac_chan->end_of_tx_event);
+    if (retval != OK) {
+        bufram_free(gdmac_chan);
+        lldbg("Unable to allocate GDMAC event(s).\n");
+        return retval;
+    }
+
+    mem2unipro_chan = &gdmac_chan->mem2unipro_chan;
+    mem2unipro_chan->burst_size = 0;
+    mem2unipro_chan->burst_len = 0;
+    mem2unipro_chan->ccr_transfer_size = 0;
+    mem2unipro_chan->burst_block_size = 0;
+    mem2unipro_chan->align_mask = 0;
+    mem2unipro_chan->ccr_base_value = 0;
+
+    pl330_code = &mem2unipro_chan->pl330_code[0];
+    /* make a copy of the UniPro TX binary code. */
+    for (desc_index = 0; desc_index < GDMAC_MAX_DESC; desc_index++) {
+        memcpy(&pl330_code[desc_index], &gdmac_mem2unipro_program[0],
+                sizeof(gdmac_mem2unipro_program));
+    }
+    memcpy(&pl330_code[desc_index],
+           &gdmac_pl330_end_code[0], sizeof(gdmac_pl330_end_code));
+
+    burst_size = mem2unipro_chan->burst_size = params->transfer_size;
+    burst_len = mem2unipro_chan->burst_len =
+            gsmac_bit_to_pos(params->burst_len) + 1;
+    ccr_transfer_size =
+            mem2unipro_chan->ccr_transfer_size = gsmac_bit_to_pos(burst_len);
+    mem2unipro_chan->burst_block_size =
+            mem2unipro_chan->burst_size * mem2unipro_chan->burst_len;
+    mem2unipro_chan->align_mask = burst_size - 1;
+    mem2unipro_chan->ccr_base_value =
+            CCR_FIXED_VALUE | CCR_ENDIAN_SWAP(params) |
+            CCR_INC_VALE(params->dst_inc_options) << 14 |
+            CCR_INC_VALE(params->src_inc_options);
+
+    for (desc_index = 0; desc_index < GDMAC_MAX_DESC; desc_index++) {
+        /* set Channel Control registers */
+        pl330_code->preburst_load_chan_ctrl_reg.value =
+                mem2unipro_chan->ccr_base_value |
+                CCR_DST_CONFIG(1, ccr_transfer_size) |
+                CCR_SRC_CONFIG(1, ccr_transfer_size);
+
+        pl330_code->burst_block_chan_ctrl_reg.value =
+                mem2unipro_chan->ccr_base_value |
+                CCR_DST_CONFIG(burst_len, ccr_transfer_size) |
+                CCR_SRC_CONFIG(burst_len, ccr_transfer_size);
+
+        pl330_code->postburst_chan_ctrl_reg.value =
+                mem2unipro_chan->ccr_base_value |
+               CCR_DST_CONFIG(1, ccr_transfer_size) | CCR_SRC_CONFIG(1, 1);
+
+        pl330_code->final_store_chan_ctrl_reg.value =
+               mem2unipro_chan->ccr_base_value |
+               CCR_DST_CONFIG(1, 1) | CCR_SRC_CONFIG(1, 1);
+
+        pl330_code++;
+    }
+    /* Set end of transfer event. */
+    ((struct pl330_end_code *)pl330_code)->end_of_tx_event.value |=
+        (gdmac_chan->end_of_tx_event << 3);
+
+    /* Set interrupt handler for this GDMAC UniPro TX channel. */
+    retval = irq_attach(GDMAC_EVENT_TO_IRQN(gdmac_chan->end_of_tx_event),
+            gdmac_irq_handler);
+    if (retval != OK) {
+        lldbg("Failed to attach interrupt %d.\n",
+                GDMAC_EVENT_TO_IRQN(gdmac_chan->end_of_tx_event));
+        return -EIO;
+    } else {
+        uint32_t enable_flags = getreg32(&control_regs->inten);
+
+        putreg32(GDMAC_EVENT_MASK(gdmac_chan->end_of_tx_event) | enable_flags,
+                &control_regs->inten);
+        up_enable_irq(GDMAC_EVENT_TO_IRQN(gdmac_chan->end_of_tx_event));
+    }
+
+    /* Set the transfer and transfer done handlers */
+    gdmac_chan->do_dma_transfer = gdmac_mem2unipro_transfer;
+    gdmac_chan->release_channel = gdmac_mem2unipro_release_channel;
+    gdmac_chan->gdmac_dev = dev;
+
+    *tsb_chan = &gdmac_chan->tsb_chan;
+
+    return retval;
+}
+
+#ifndef NO_MEM2IO_SUPPORT
 void gdmac_mem2io_release_channel(struct tsb_dma_chan *tsb_chan)
 {
     struct gdmac_chan *gdmac_chan =
@@ -1201,7 +1606,9 @@ int tsb_gdmac_allocal_mem2io_chan(struct device *dev,
 
     return retval;
 }
+#endif
 
+#ifndef NO_IO2MEM_SUPPORT
 void gdmac_io2mem_release_channel(struct tsb_dma_chan *tsb_chan)
 {
     struct gdmac_chan *gdmac_chan =
@@ -1507,6 +1914,7 @@ int tsb_gdmac_allocal_io2mem_chan(struct device *dev,
 
     return retval;
 }
+#endif
 
 int gdmac_get_caps(struct device *dev, struct device_dma_caps *caps)
 {
@@ -1531,6 +1939,17 @@ int gdmac_chan_alloc(struct device *dev, struct device_dma_params *params,
     int retval = OK;
 
     if ((params->src_dev == DEVICE_DMA_DEV_MEM)
+            && (params->dst_dev == DEVICE_DMA_DEV_UNIPRO)) {
+        if ((params->src_devid != 0) ||
+            (params->dst_devid < 16) || (params->dst_devid > 31)) {
+            return -EINVAL;
+        }
+
+        return tsb_gdmac_allocal_mem2unipro_chan(dev, params, tsb_chan);
+    }
+
+#ifndef NO_MEM2MEM_SUPPORT
+    if ((params->src_dev == DEVICE_DMA_DEV_MEM)
             && (params->dst_dev == DEVICE_DMA_DEV_MEM)) {
         if ((params->src_devid != 0) || (params->dst_devid != 0)) {
             return -EINVAL;
@@ -1538,7 +1957,9 @@ int gdmac_chan_alloc(struct device *dev, struct device_dma_params *params,
 
         return tsb_gdmac_allocal_mem2Mem_chan(dev, params, tsb_chan);
     }
+#endif
 
+#ifndef NO_MEM2IO_SUPPORT
     if ((params->src_dev == DEVICE_DMA_DEV_MEM)
             && (params->dst_dev == DEVICE_DMA_DEV_IO)) {
         if ((params->src_devid != 0) || (params->dst_devid >= 32)) {
@@ -1546,7 +1967,9 @@ int gdmac_chan_alloc(struct device *dev, struct device_dma_params *params,
         }
         return tsb_gdmac_allocal_mem2io_chan(dev, params, tsb_chan);
     }
+#endif
 
+#ifndef NO_IO2MEM_SUPPORT
     if ((params->src_dev == DEVICE_DMA_DEV_IO)
             && (params->dst_dev == DEVICE_DMA_DEV_MEM)) {
         if ((params->dst_devid != 0) || (params->src_devid >= 32)) {
@@ -1555,15 +1978,7 @@ int gdmac_chan_alloc(struct device *dev, struct device_dma_params *params,
 
         return tsb_gdmac_allocal_io2mem_chan(dev, params, tsb_chan);
     }
-
-    if ((params->src_dev == DEVICE_DMA_DEV_MEM)
-            && (params->dst_dev == DEVICE_DMA_DEV_IO)) {
-        if ((params->src_devid != 0) || (params->dst_devid >= 32)) {
-            return -EINVAL;
-        }
-
-        return tsb_gdmac_allocal_mem2io_chan(dev, params, tsb_chan);
-    }
+#endif
 
     lldbg("user requested not supported DMA channel.\n");
 
