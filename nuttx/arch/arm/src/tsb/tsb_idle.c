@@ -113,7 +113,7 @@ void up_idle(void)
   up_idlepm();
 
   /* SW-425 */
-#ifdef CONFIG_DEBUG
+#if defined(CONFIG_DEBUG) && !defined(CONFIG_TSB_CHIP_REV_ES3)
   /* We theorize that instruction fetch on the bridge silicon may stall an
    * in-progress USB DMA transfer.  The ideal solution is to halt the processor
    * during idle via WFI (wait for interrupt), but that degrades the JTAG
