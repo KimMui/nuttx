@@ -219,7 +219,6 @@ int tsb_i2s_tx_data(struct tsb_i2s_info *info)
 
     return ret;
 }
-<<<<<<< HEAD
 
 static int tsb_i2s_irq_so_handler(int irq, void *context)
 {
