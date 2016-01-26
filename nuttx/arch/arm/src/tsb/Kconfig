@@ -43,6 +43,12 @@ config ARCH_CHIP_DEVICE_GDMAC
 	---help---
 		TSB GDMAC Driver
 
+config ARCH_I2S_USE_DMA
+    bool "Enable DMA for I2S data transfer"
+    depends on ARCH_CHIP_DEVICE_GDMAC
+    ---help---
+        Enable I2S to utilize DMA to move data.
+
 config ARCH_UNIPROTX_USE_DMA
 	bool "Enable DMA for Unipro TX"
 	depends on ARCH_CHIP_DEVICE_GDMAC

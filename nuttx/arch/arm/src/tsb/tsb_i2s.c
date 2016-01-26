@@ -275,8 +275,8 @@ int tsb_i2s_tx_is_active(struct tsb_i2s_info *info)
            (info->flags & TSB_I2S_FLAG_TX_ACTIVE);
 }
 
-static uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
-                                       enum tsb_i2s_block block)
+uint32_t tsb_i2s_get_block_base(struct tsb_i2s_info *info,
+                                enum tsb_i2s_block block)
 {
     uint32_t base;
 

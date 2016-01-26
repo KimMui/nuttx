@@ -45,4 +45,14 @@ void tsb_i2s_stop_receiver(struct tsb_i2s_info *info, int is_err);
 int tsb_i2s_start_transmitter(struct tsb_i2s_info *info);
 void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err);
 
+/*
+ *  Nothing need to be done in the following routines if we use SW pulling
+ */
+int tsb_i2s_xfer_open(struct tsb_i2s_info *info);
+void tsb_i2s_xfer_close(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_prepare_receiver(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_shutdown_receiver(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_prepare_transmitter(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_shutdown_transmitter(struct tsb_i2s_info *info);
+
 #endif /* __TSB_I2S_XFER_H */

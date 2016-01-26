@@ -25,8 +25,8 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * @author Kim Mui
- * @brief TSB I2S device driver's data movement module.
+ * @author Mark Greer
+ * @brief TSB I2S device driver
  */
 /*
  * Clocks:
@@ -44,6 +44,7 @@
 #include <nuttx/device.h>
 #include <nuttx/device_pll.h>
 #include <nuttx/device_i2s.h>
+#include <nuttx/device_dma.h>
 #include <nuttx/ring_buf.h>
 
 #include <arch/byteorder.h>
@@ -53,103 +54,111 @@
 
 #include "tsb_i2s.h"
 
-static int tsb_i2s_drain_fifo(struct tsb_i2s_info *info,
-                              enum device_i2s_event *event)
+static struct {
+    struct device *dev;
+    void *tx_chan;
+    void *rx_chan;
+    sem_t dma_chan_lock;
+} i2s_dma;
+
+uint32_t g_xfer_intr_flag = TSB_I2S_REG_INT_DMACMSK; //  | TSB_I2S_REG_INT_INT;
+
+static int tsb_i2s_rx_enqueue_rb(struct tsb_i2s_info *info,
+                             enum device_i2s_event *event);
+static uint32_t rx_count = 0;
+
+static int i2s_dma_rx_callback(struct device *dev, void *chan,
+        struct device_dma_op *op, unsigned int callback_event, void *arg)
 {
-    unsigned int i;
-    uint32_t intstat;
-    uint32_t *dp;
-    int ret = 0;
+    struct tsb_i2s_info *info = arg;
+    enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
 
-    dp = ring_buf_get_tail(info->rx_rb);
+    rx_count++;
+    if (callback_event & DEVICE_DMA_CALLBACK_EVENT_COMPLETE) {
+        struct ring_buf *rx_rb = info->rx_rb;
 
-    for (i = 0; i < ring_buf_space(info->rx_rb); i += sizeof(*dp)) {
-        intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INTSTAT);
+        info->rx_rb = ring_buf_get_next(info->rx_rb);
 
-        if (intstat & TSB_I2S_REG_INT_ERROR_MASK) {
-            *event = tsb_i2s_intstat2event(intstat);
-            ret = -EIO;
-            break;
+        if (ring_buf_is_producers(info->rx_rb)) {
+            ring_buf_reset(info->rx_rb);
+            if (ring_buf_space(info->rx_rb) % 4) {
+                event = DEVICE_I2S_EVENT_DATA_LEN;
+                lldbg("Error %x\n", ring_buf_len(info->rx_rb));
+            } else {
+                int ret;
+
+                ret = tsb_i2s_rx_enqueue_rb(info, &event);
+                if (ret) {
+                    lldbg("Failed to enqueue I2S buffer.\n");
+                }
+            }
         }
 
-        if (!(intstat & TSB_I2S_REG_INT_INT))
-            break;
+        ring_buf_put(rx_rb, op->sg[0].len);
+        ring_buf_pass(rx_rb);
 
-        *dp++ = tsb_i2s_read_raw(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_LMEM00);
+        if (info->rx_callback)
+            info->rx_callback(rx_rb, DEVICE_I2S_EVENT_RX_COMPLETE,
+                              info->rx_arg);
 
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI, intstat);
+        device_dma_op_free(i2s_dma.dev, op);
+
     }
 
-    ring_buf_put(info->rx_rb, i);
-
-    return ret;
+    return OK;
 }
 
-static int tsb_i2s_fill_fifo(struct tsb_i2s_info *info,
+static int tsb_i2s_rx_enqueue_rb(struct tsb_i2s_info *info,
                              enum device_i2s_event *event)
 {
-    unsigned int i;
-    uint32_t intstat;
+    int retval;
+    struct device_dma_op *dma_op = NULL;
+    uint32_t base;
     uint32_t *dp;
-    int ret = 0;
 
-    dp = (uint32_t *)ring_buf_get_head(info->tx_rb);
+    dp = (uint32_t *)ring_buf_get_head(info->rx_rb);
 
-    for (i = 0; i < ring_buf_len(info->tx_rb); i += sizeof(*dp)) {
-        intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INTSTAT);
-
-        if (intstat & TSB_I2S_REG_INT_ERROR_MASK) {
-            *event = tsb_i2s_intstat2event(intstat);
-            ret = -EIO;
-            break;
-        }
-
-        if (!(intstat & TSB_I2S_REG_INT_INT))
-            break;
-
-        tsb_i2s_write_raw(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_LMEM00, *dp++);
-
-        tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO, intstat);
+    retval = device_dma_op_alloc(i2s_dma.dev, 1, 0, &dma_op);
+    if (retval != OK) {
+        lowsyslog("unipro: failed allocate a DMA op, retval = %d.\n", retval);
+        return retval;
     }
 
-    ring_buf_pull(info->tx_rb, i);
+    dma_op->callback = i2s_dma_rx_callback;
+    dma_op->callback_arg = info;
+    dma_op->callback_events = DEVICE_DMA_CALLBACK_EVENT_COMPLETE;
+    dma_op->sg_count = 1;
 
-    return ret;
+    base = tsb_i2s_get_block_base(info, TSB_I2S_BLOCK_SI);
+    base += TSB_I2S_REG_LMEM00;
+    dma_op->sg[0].src_addr = (off_t) base;
+    dma_op->sg[0].dst_addr = (off_t) dp;
+    dma_op->sg[0].len = (size_t)ring_buf_space(info->rx_rb);
+
+    retval = device_dma_enqueue(i2s_dma.dev, i2s_dma.rx_chan, dma_op);
+    if (retval) {
+        lowsyslog("failed to start DMA transfer: %d\n", retval);
+    }
+
+    return retval;
 }
 
-static int tsb_i2s_rx_data(struct tsb_i2s_info *info)
+int tsb_i2s_rx_data(struct tsb_i2s_info *info)
 {
     enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
     int ret = 0;
 
-    while (ring_buf_is_producers(info->rx_rb)) {
+    if (ring_buf_is_producers(info->rx_rb)) {
+        ring_buf_reset(info->rx_rb);
         if (ring_buf_space(info->rx_rb) % 4) {
             event = DEVICE_I2S_EVENT_DATA_LEN;
             ret = -EINVAL;
-            break;
+        } else {
+            ret = tsb_i2s_rx_enqueue_rb(info, &event);
+            if (ret) {
+                lldbg("Failed to enqueue I2S buffer.\n");
+            }
         }
-
-        ret = tsb_i2s_drain_fifo(info, &event);
-        if (ret)
-            break;
-
-        if (!ring_buf_is_full(info->rx_rb)) {
-            /*
-             * The FIFO must be empty so unmask the irq and exit.  When there
-             * is data in the FIFO, the irq handler will call this routine and
-             * the FIFO will be drained again.
-             */
-            tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INT_INT);
-            return 0;
-        }
-
-        ring_buf_pass(info->rx_rb);
-
-        if (info->rx_callback)
-            info->rx_callback(info->rx_rb, DEVICE_I2S_EVENT_RX_COMPLETE,
-                              info->rx_arg);
-
-        info->rx_rb = ring_buf_get_next(info->rx_rb);
     }
 
     if (ret) {
@@ -168,32 +177,18 @@ static int tsb_i2s_rx_data(struct tsb_i2s_info *info)
     return ret;
 }
 
-static int tsb_i2s_tx_data(struct tsb_i2s_info *info)
+static int tsb_i2s_tx_enqueue_rb(struct tsb_i2s_info *info,
+                             enum device_i2s_event *event);
+static uint32_t tx_count = 0;
+
+static int i2s_dma_tx_callback(struct device *dev, void *chan,
+        struct device_dma_op *op, unsigned int callback_event, void *arg)
 {
+    struct tsb_i2s_info *info = arg;
     enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
-    int ret = 0;
 
-    while (ring_buf_is_consumers(info->tx_rb)) {
-        if (ring_buf_len(info->tx_rb) % 4) {
-            event = DEVICE_I2S_EVENT_DATA_LEN;
-            ret = -EINVAL;
-            break;
-        }
-
-        ret = tsb_i2s_fill_fifo(info, &event);
-        if (ret)
-            break;
-
-        if (!ring_buf_is_empty(info->tx_rb)) {
-            /*
-             * The FIFO must be full so unmask the irq and exit.  When there
-             * is room in the FIFO, the irq handler will call this routine and
-             * the FIFO will be filled again.
-             */
-            tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SO, TSB_I2S_REG_INT_INT);
-            return 0;
-        }
-
+    tx_count++;
+    if (callback_event & DEVICE_DMA_CALLBACK_EVENT_COMPLETE) {
         ring_buf_reset(info->tx_rb);
         ring_buf_pass(info->tx_rb);
 
@@ -202,6 +197,77 @@ static int tsb_i2s_tx_data(struct tsb_i2s_info *info)
                               info->tx_arg);
 
         info->tx_rb = ring_buf_get_next(info->tx_rb);
+
+        if (ring_buf_is_consumers(info->tx_rb)) {
+            if (ring_buf_len(info->tx_rb) % 4) {
+                event = DEVICE_I2S_EVENT_DATA_LEN;
+                lldbg("Error: %x\n", ring_buf_len(info->tx_rb));
+            } else {
+                int ret = OK;
+                ret = tsb_i2s_tx_enqueue_rb(info, &event);
+                if (ret) {
+                    lldbg("Failed to enqueue I2S buffer.\n");
+                }
+            }
+        }
+
+        device_dma_op_free(i2s_dma.dev, op);
+    }
+
+    return OK;
+}
+
+static int tsb_i2s_tx_enqueue_rb(struct tsb_i2s_info *info,
+                             enum device_i2s_event *event)
+{
+    int retval;
+    struct device_dma_op *dma_op = NULL;
+    uint32_t base;
+    uint32_t *dp;
+
+    dp = (uint32_t *)ring_buf_get_head(info->tx_rb);
+
+    retval = device_dma_op_alloc(i2s_dma.dev, 1, 0, &dma_op);
+    if (retval != OK) {
+        lowsyslog("unipro: failed allocate a DMA op, retval = %d.\n", retval);
+        return retval;
+    }
+
+    dma_op->callback = i2s_dma_tx_callback;
+    dma_op->callback_arg = info;
+    dma_op->callback_events = DEVICE_DMA_CALLBACK_EVENT_COMPLETE;
+    dma_op->sg_count = 1;
+
+    base = tsb_i2s_get_block_base(info, TSB_I2S_BLOCK_SO);
+    base += TSB_I2S_REG_LMEM00;
+
+    dma_op->sg[0].src_addr = (off_t) dp;
+    dma_op->sg[0].dst_addr = (off_t) base;
+    dma_op->sg[0].len = ring_buf_len(info->tx_rb);
+
+    retval = device_dma_enqueue(i2s_dma.dev, i2s_dma.tx_chan, dma_op);
+    if (retval) {
+        lowsyslog("failed to start DMA transfer: %d\n", retval);
+    }
+
+    return retval;
+}
+
+int tsb_i2s_tx_data(struct tsb_i2s_info *info)
+{
+    enum device_i2s_event event = DEVICE_I2S_EVENT_NONE;
+    int ret = 0;
+
+    if (ring_buf_is_consumers(info->tx_rb)) {
+        if (ring_buf_len(info->tx_rb) % 4) {
+            event = DEVICE_I2S_EVENT_DATA_LEN;
+            ret = -EINVAL;
+        } else {
+            ret = tsb_i2s_tx_enqueue_rb(info, &event);
+            if (ret) {
+                lldbg("Failed to enqueue I2S buffer.\n");
+            }
+        }
     }
 
     if (ret) {
@@ -227,18 +293,16 @@ int tsb_i2s_start_receiver(struct tsb_i2s_info *info)
 
     flags = irqsave();
 
-    if (tsb_i2s_rx_is_active(info)) {
-        ret = tsb_i2s_rx_data(info);
-        if (ret)
-            goto err_irqrestore;
-    }
+    ret = tsb_i2s_rx_data(info);
+    if (ret)
+        goto err_irqrestore;
 
     tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI,
                        TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
                        TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
     tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SI,
                         TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                        TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                        TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
 
     ret = tsb_i2s_start(info, TSB_I2S_BLOCK_SI);
     if (ret)
@@ -253,7 +317,7 @@ int tsb_i2s_start_receiver(struct tsb_i2s_info *info)
 err_mask_irqs:
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
 err_irqrestore:
     irqrestore(flags);
 
@@ -270,10 +334,10 @@ void tsb_i2s_stop_receiver(struct tsb_i2s_info *info, int is_err)
 
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
     tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI,
                        TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
 
     info->flags &= ~TSB_I2S_FLAG_RX_ACTIVE;
 
@@ -293,6 +357,7 @@ int tsb_i2s_start_transmitter(struct tsb_i2s_info *info)
                            TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
         /* TSB_I2S_REG_INT_INT is unmasked in tsb_i2s_tx_data() */
         tsb_i2s_unmask_irqs(info, TSB_I2S_BLOCK_SO,
+                            g_xfer_intr_flag |
                             TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
                             TSB_I2S_REG_INT_OR);
 
@@ -321,10 +386,10 @@ void tsb_i2s_stop_transmitter(struct tsb_i2s_info *info, int is_err)
 
     tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SO,
                       TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                      TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
     tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SO,
                        TSB_I2S_REG_INT_LRCK | TSB_I2S_REG_INT_UR |
-                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_INT);
+                       TSB_I2S_REG_INT_OR | TSB_I2S_REG_INT_DMACMSK);
 
     info->flags &= ~TSB_I2S_FLAG_TX_ACTIVE;
 
@@ -353,13 +418,16 @@ static int tsb_i2s_irq_si_handler(int irq, void *context)
 
     intstat = tsb_i2s_read(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INTSTAT);
 
-    if (intstat & TSB_I2S_REG_INT_INT)
+    if (intstat & TSB_I2S_REG_INT_INT) {
+        tsb_i2s_mask_irqs(info, TSB_I2S_BLOCK_SI, TSB_I2S_REG_INT_INT);
         tsb_i2s_rx_data(info);
-    else
+    } else {
         tsb_i2s_clear_irqs(info, TSB_I2S_BLOCK_SI, intstat);
+    }
 
     return OK;
 }
+
 
 int tsb_i2s_xfer_irq_attach(struct tsb_i2s_info *info)
 {
@@ -395,17 +463,47 @@ int tsb_i2s_xfer_irq_detach(struct tsb_i2s_info *info)
 
 int tsb_i2s_xfer_open(struct tsb_i2s_info *info)
 {
-    return OK;
+    int retval = OK;
+
+    i2s_dma.dev = device_open(DEVICE_TYPE_DMA_HW, 0);
+    if (!i2s_dma.dev) {
+        retval = -ENODEV;
+    }
+
+    return retval;
 }
 
 void tsb_i2s_xfer_close(struct tsb_i2s_info *info)
 {
-    return;
+    if (i2s_dma.dev) {
+        device_close(i2s_dma.dev);
+    }
 }
 
 int tsb_i2s_xfer_prepare_receiver(struct tsb_i2s_info *info)
 {
-    retern OK;
+    struct device_dma_params chan_params = {
+            .src_dev = DEVICE_DMA_DEV_IO,
+            .src_devid = 1,
+            .src_inc_options = DEVICE_DMA_INC_NOAUTO,
+            .dst_dev = DEVICE_DMA_DEV_MEM,
+            .dst_devid = 0,
+            .dst_inc_options = DEVICE_DMA_INC_AUTO,
+            .transfer_size = DEVICE_DMA_TRANSFER_SIZE_32,
+            .burst_len = DEVICE_DMA_BURST_LEN_1,
+            .swap = DEVICE_DMA_SWAP_SIZE_NONE,
+    };
+
+    device_dma_chan_alloc(i2s_dma.dev, &chan_params,
+            &i2s_dma.rx_chan);
+
+    if (i2s_dma.rx_chan == NULL) {
+        lowsyslog("i2s: couldn't allocate rx channel\n");
+
+        return -ENOMEM;
+    }
+
+    return OK;
 }
 
 int tsb_i2s_xfer_shutdown_receiver(struct tsb_i2s_info *info)
@@ -413,12 +511,33 @@ int tsb_i2s_xfer_shutdown_receiver(struct tsb_i2s_info *info)
     return OK;
 }
 
-int tsb_i2s_xfer_prepare_transmitter(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_prepare_transmitter(struct tsb_i2s_info *info)
 {
+    struct device_dma_params chan_params = {
+            .src_dev = DEVICE_DMA_DEV_MEM,
+            .src_devid = 0,
+            .src_inc_options = DEVICE_DMA_INC_AUTO,
+            .dst_dev = DEVICE_DMA_DEV_IO,
+            .dst_devid = 0,
+            .dst_inc_options = DEVICE_DMA_INC_NOAUTO,
+            .transfer_size = DEVICE_DMA_TRANSFER_SIZE_32,
+            .burst_len = DEVICE_DMA_BURST_LEN_1,
+            .swap = DEVICE_DMA_SWAP_SIZE_NONE,
+    };
+
+    device_dma_chan_alloc(i2s_dma.dev, &chan_params,
+            &i2s_dma.tx_chan);
+
+    if (i2s_dma.tx_chan == NULL) {
+        lowsyslog("i2s: couldn't allocate tx channel\n");
+
+        return -ENOMEM;
+    }
+
     return OK;
 }
 
-int tsb_i2s_xfer_shutdown_transmitter(struct tsb_i2s_info *info);
+int tsb_i2s_xfer_shutdown_transmitter(struct tsb_i2s_info *info)
 {
     return OK;
 }
