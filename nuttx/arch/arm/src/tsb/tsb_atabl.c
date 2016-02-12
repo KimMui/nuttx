@@ -417,7 +417,7 @@ static int tsb_atabl_req_is_activated(struct device *dev, void *req)
     }
 
     if ((start_reg & ATABL_GDMAC_HANDSHAKE_START) == 0) {
-        reqn->state = TSB_ATABL_REQ_STATE_ALLOCATED;
+        reqn->state = TSB_ATABL_REQ_STATE_CONNECTED;
         return 0;
     }
 
