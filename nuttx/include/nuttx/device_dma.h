@@ -80,6 +80,7 @@
 #define DEVICE_DMA_CALLBACK_EVENT_COMPLETE  BIT(1)
 #define DEVICE_DMA_CALLBACK_EVENT_DEQUEUED  BIT(2)
 #define DEVICE_DMA_CALLBACK_EVENT_ERROR     BIT(3)
+#define DEVICE_DMA_CALLBACK_EVENT_RECOVERED BIT(4)
 
 /* Alignments for the source and destination address */
 #define DEVICE_DMA_ALIGNMENT_8              BIT(0)

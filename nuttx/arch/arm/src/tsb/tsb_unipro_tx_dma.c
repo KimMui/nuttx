@@ -65,6 +65,7 @@ struct dma_channel {
     void *chan;
     void *req;
     unsigned int cportid;
+    uint32_t saved_tx_water_mark;
 };
 
 struct unipro_xfer_descriptor {
@@ -266,7 +267,6 @@ static int unipro_dma_tx_callback(struct device *dev, void *chan,
 
             unipro_dma_tx_set_eom_flag(desc->cport);
 
-            list_del(&desc->list);
             device_dma_op_free(unipro_dma.dev, op);
 
             if (desc->callback != NULL) {
@@ -282,6 +282,69 @@ static int unipro_dma_tx_callback(struct device *dev, void *chan,
         } else {
             desc->channel = NULL;
         }
+
+        sem_post(&worker.tx_fifo_lock);
+    }
+
+    if (tsb_get_rev_id() == tsb_rev_es2) {
+        return retval;
+    }
+
+    /*
+     * The following only valid on es3 or later chips.
+     */
+    if (event & DEVICE_DMA_CALLBACK_EVENT_ERROR) {
+        struct dma_channel *desc_chan = desc->channel;
+
+        if (device_atabl_req_is_activated(unipro_dma.atabl_dev,
+                                          desc_chan->req)) {
+            unsigned int cportid = desc_chan->cportid;
+
+            /*
+             * save the current water mark setting and write 0 to it based
+             * on Toshiba's document.
+             */
+            desc_chan->saved_tx_water_mark =
+                    unipro_read(REG_TX_BUFFER_SPACE_OFFSET_REG(cportid));
+            unipro_write(REG_TX_BUFFER_SPACE_OFFSET_REG(cportid), 0);
+
+            return DEVICE_DMA_ERROR_DMA_FAILED;
+        } else {
+            return OK;
+        }
+    }
+
+    if (event & DEVICE_DMA_CALLBACK_EVENT_RECOVERED) {
+        struct dma_channel *desc_chan = desc->channel;
+        uint32_t count;
+
+        for (count = 0; count < 100; count++) {
+            if (device_atabl_req_is_activated(unipro_dma.atabl_dev,
+                                              desc_chan->req) == 0) {
+                break;
+            }
+        }
+
+        /*
+         * restore the saved water mark setting based on Toshiba's document.
+         */
+        unipro_write(REG_TX_BUFFER_SPACE_OFFSET_REG(desc_chan->cportid),
+                     desc_chan->saved_tx_water_mark);
+
+        device_atabl_transfer_completed(unipro_dma.atabl_dev,
+                                        desc_chan->req);
+
+        return OK;
+    }
+
+    if (event & DEVICE_DMA_CALLBACK_EVENT_DEQUEUED) {
+        device_dma_op_free(unipro_dma.dev, op);
+
+        if (desc->callback != NULL) {
+            desc->callback(0, desc->data, desc->priv);
+        }
+
+        unipro_xfer_dequeue_descriptor(desc);
 
         sem_post(&worker.tx_fifo_lock);
     }
@@ -311,6 +374,7 @@ static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc,
     }
 
     desc->channel = channel;
+
     retval = device_dma_op_alloc(unipro_dma.dev, 1, 0, &dma_op);
     if (retval != OK) {
         lowsyslog("unipro: failed allocate a DMA op, retval = %d.\n", retval);
@@ -322,11 +386,14 @@ static int unipro_dma_xfer(struct unipro_xfer_descriptor *desc,
     dma_op->callback_events = DEVICE_DMA_CALLBACK_EVENT_COMPLETE;
     if (tsb_get_rev_id() != tsb_rev_es2) {
        dma_op->callback_events |=  DEVICE_DMA_CALLBACK_EVENT_START;
+       dma_op->callback_events |=  DEVICE_DMA_CALLBACK_EVENT_ERROR;
+       dma_op->callback_events |=  DEVICE_DMA_CALLBACK_EVENT_RECOVERED;
+       dma_op->callback_events |=  DEVICE_DMA_CALLBACK_EVENT_DEQUEUED;
     }
     dma_op->sg_count = 1;
     dma_op->sg[0].len = xfer_len;
 
-    DBG_UNIPRO("xfer: chan=%u, len=%zu\n", channel->id, xfer_len);
+    DBG_UNIPRO("xfer: chan=%u, len=%zu\n", channel->cportid, xfer_len);
 
     cport_buf = desc->cport->tx_buf;
     xfer_buf = (void*) desc->data;
